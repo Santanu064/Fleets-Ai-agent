@@ -46,7 +46,7 @@ Fault-code meanings vary by vehicle make, model, and engine system, so please se
 If the warning is red/flashing, the engine is overheating, smoke is visible, brakes feel unsafe, or power is dropping, stop driving and wait for support.`;
   }
 
-  if (mediaType === "audio" && content === "[Voice Note Received]") {
+  if (mediaType === "audio" && (content === "[Voice Note Received]" || content.startsWith("[Voice Note Received"))) {
     return "I received your voice note, but I could not process the audio clearly. Please type the vehicle issue or send another short voice note from a quieter place. If you are driving, park safely first.";
   }
 
@@ -114,6 +114,7 @@ export async function POST(request: NextRequest) {
   let mediaType: InboundMediaType = "text";
   let locationLat: number | null = null;
   let locationLng: number | null = null;
+  let voiceProcessingError: string | null = null;
 
   // Extract message content based on type
   if (msgType === "text") {
@@ -135,17 +136,15 @@ export async function POST(request: NextRequest) {
     mediaUrl = mediaDetails.publicUrl;
 
     if (mediaDetails.buffer) {
-      const transcript = await transcribeVoiceNote(mediaDetails.buffer, mediaDetails.mimeType);
-      if (transcript) {
-        textContent = `🎙️ [Voice Note Transcribed]: "${transcript}"`;
+      const transcription = await transcribeVoiceNote(mediaDetails.buffer, mediaDetails.mimeType);
+      if (transcription.text) {
+        textContent = `🎙️ [Voice Note Transcribed]: "${transcription.text}"`;
       } else {
-        textContent = "[Voice Note Received]";
-      }
-      if (textContent.includes("[Voice Note Transcribed]:")) {
-        textContent = textContent.replace(/^.*?(\[Voice Note Transcribed\]:)/, "$1");
+        const failureReason = transcription.error || "unknown_transcription_error";
+        textContent = `[Voice Note Received - Transcription Failed: ${failureReason}]`;
       }
     } else {
-      textContent = "[Voice Note Received]";
+      textContent = "[Voice Note Received - Media Download Failed]";
     }
   } else if (msgType === "video") {
     textContent = message.video?.caption || "[Video Recorded]";
@@ -231,7 +230,7 @@ export async function POST(request: NextRequest) {
 
     const canReplyImmediately =
       Boolean(extractFaultCode(textContent)) ||
-      (mediaType === "audio" && textContent === "[Voice Note Received]");
+      (mediaType === "audio" && (textContent === "[Voice Note Received]" || textContent.startsWith("[Voice Note Received")));
     const immediateIssueResponse = canReplyImmediately
       ? buildIssueFallbackResponse(textContent, mediaType)
       : null;

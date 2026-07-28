@@ -2,14 +2,24 @@
  * Transcribes WhatsApp voice audio notes using Groq's free Whisper Large v3 API.
  * Supports Multilingual speech: Hindi, Bengali, English, Hinglish, etc.
  */
+export interface VoiceTranscriptionResult {
+  text: string | null;
+  error: string | null;
+}
+
 export async function transcribeVoiceNote(
   audioBuffer: Buffer,
   mimeType: string = "audio/ogg"
-): Promise<string | null> {
+): Promise<VoiceTranscriptionResult> {
   const groqApiKey = process.env.GROQ_API_KEY;
   if (!groqApiKey) {
     console.warn("[Voice Transcription] GROQ_API_KEY not found in environment variables");
-    return null;
+    return { text: null, error: "missing_groq_api_key" };
+  }
+
+  if (audioBuffer.byteLength === 0) {
+    console.warn("[Voice Transcription] Empty audio buffer");
+    return { text: null, error: "empty_audio_buffer" };
   }
 
   try {
@@ -53,7 +63,7 @@ export async function transcribeVoiceNote(
     if (!res.ok) {
       const errText = await res.text();
       console.error("[Groq Whisper Error]:", res.status, errText);
-      return null;
+      return { text: null, error: `groq_error_${res.status}` };
     }
 
     const data = await res.json();
@@ -62,9 +72,12 @@ export async function transcribeVoiceNote(
       hasTranscript: Boolean(transcript),
       textLength: transcript?.length || 0,
     });
-    return transcript || null;
+    return {
+      text: transcript || null,
+      error: transcript ? null : "empty_transcript",
+    };
   } catch (err) {
     console.error("[Voice Transcription Exception]:", err);
-    return null;
+    return { text: null, error: "transcription_exception" };
   }
 }
