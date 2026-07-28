@@ -66,7 +66,13 @@ export async function downloadAndSaveWhatsAppMediaDetails(
       headers: { Authorization: `Bearer ${token}` },
     });
     const metaData = await metaRes.json();
-    if (!metaData.url) return { publicUrl: null, buffer: null, mimeType: "" };
+    if (!metaRes.ok || !metaData.url) {
+      console.error("[WhatsApp Media] Failed to get media URL:", {
+        status: metaRes.status,
+        error: metaData.error?.message,
+      });
+      return { publicUrl: null, buffer: null, mimeType: "" };
+    }
 
     const mime = metaData.mime_type || "";
 
@@ -74,8 +80,20 @@ export async function downloadAndSaveWhatsAppMediaDetails(
     const mediaRes = await fetch(metaData.url, {
       headers: { Authorization: `Bearer ${token}` },
     });
+    if (!mediaRes.ok) {
+      console.error("[WhatsApp Media] Failed to download media bytes:", {
+        status: mediaRes.status,
+        mime,
+      });
+      return { publicUrl: null, buffer: null, mimeType: mime };
+    }
     const arrayBuffer = await mediaRes.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
+    console.info("[WhatsApp Media] Downloaded media:", {
+      mediaType,
+      mime,
+      bytes: buffer.byteLength,
+    });
 
     // Determine extension
     let ext = "bin";

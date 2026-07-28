@@ -47,7 +47,7 @@ If the warning is red/flashing, the engine is overheating, smoke is visible, bra
   }
 
   if (mediaType === "audio" && content === "[Voice Note Received]") {
-    return "I received your voice note, but I could not transcribe it clearly. Please type the vehicle issue or send another voice note from a quieter place. If you are driving, park safely first.";
+    return "I received your voice note, but I could not process the audio clearly. Please type the vehicle issue or send another short voice note from a quieter place. If you are driving, park safely first.";
   }
 
   if (mediaType === "audio" && content.includes("[Voice Note Transcribed]:")) {
@@ -96,6 +96,18 @@ export async function POST(request: NextRequest) {
   const name = contact?.profile?.name || null;
   const whatsappMsgId = message.id;
   const msgType = message.type as "text" | "image" | "audio" | "voice" | "video" | "location";
+
+  if (whatsappMsgId) {
+    const { data: existingMessage } = await supabase
+      .from("messages")
+      .select("id")
+      .eq("whatsapp_msg_id", whatsappMsgId)
+      .maybeSingle();
+
+    if (existingMessage) {
+      return Response.json({ status: "duplicate" });
+    }
+  }
 
   let textContent = "";
   let mediaUrl: string | null = null;

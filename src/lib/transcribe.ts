@@ -18,6 +18,17 @@ export async function transcribeVoiceNote(
     if (mimeType.includes("mp3")) filename = "voicenote.mp3";
     else if (mimeType.includes("wav")) filename = "voicenote.wav";
     else if (mimeType.includes("m4a")) filename = "voicenote.m4a";
+    else if (mimeType.includes("mp4")) filename = "voicenote.mp4";
+    else if (mimeType.includes("mpeg")) filename = "voicenote.mp3";
+    else if (mimeType.includes("webm")) filename = "voicenote.webm";
+    else if (mimeType.includes("amr")) filename = "voicenote.amr";
+    else if (mimeType.includes("aac")) filename = "voicenote.aac";
+
+    console.info("[Voice Transcription] Sending audio to Groq:", {
+      mimeType,
+      filename,
+      bytes: audioBuffer.byteLength,
+    });
 
     // Extract ArrayBuffer slice for Node.js BlobPart compatibility
     const arrayBuffer = audioBuffer.buffer.slice(
@@ -47,6 +58,10 @@ export async function transcribeVoiceNote(
 
     const data = await res.json();
     const transcript = data.text?.trim();
+    console.info("[Voice Transcription] Groq transcription complete:", {
+      hasTranscript: Boolean(transcript),
+      textLength: transcript?.length || 0,
+    });
     return transcript || null;
   } catch (err) {
     console.error("[Voice Transcription Exception]:", err);
