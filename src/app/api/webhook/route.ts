@@ -1,8 +1,9 @@
 import { NextRequest } from "next/server";
 import { supabase } from "@/lib/supabase";
-import { sendWhatsAppMessage, downloadAndSaveWhatsAppMedia } from "@/lib/whatsapp";
+import { sendWhatsAppMessage, downloadAndSaveWhatsAppMedia, downloadAndSaveWhatsAppMediaDetails } from "@/lib/whatsapp";
 import { getAIResponse } from "@/lib/ai";
 import { getVideoGuideForCategory } from "@/lib/video-guides";
+import { transcribeVoiceNote } from "@/lib/transcribe";
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
@@ -56,9 +57,20 @@ export async function POST(request: NextRequest) {
     mediaUrl = await downloadAndSaveWhatsAppMedia(message.image.id, "image");
   } else if (msgType === "audio" || msgType === "voice") {
     const audioObj = message.audio || message.voice;
-    textContent = "[Voice Message Received]";
     mediaType = "audio";
-    mediaUrl = await downloadAndSaveWhatsAppMedia(audioObj.id, "audio");
+    const mediaDetails = await downloadAndSaveWhatsAppMediaDetails(audioObj.id, "audio");
+    mediaUrl = mediaDetails.publicUrl;
+
+    if (mediaDetails.buffer) {
+      const transcript = await transcribeVoiceNote(mediaDetails.buffer, mediaDetails.mimeType);
+      if (transcript) {
+        textContent = `🎙️ [Voice Note Transcribed]: "${transcript}"`;
+      } else {
+        textContent = "[Voice Note Received]";
+      }
+    } else {
+      textContent = "[Voice Note Received]";
+    }
   } else if (msgType === "video") {
     textContent = message.video?.caption || "[Video Recorded]";
     mediaType = "video";
