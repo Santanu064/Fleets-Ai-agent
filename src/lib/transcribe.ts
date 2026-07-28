@@ -11,7 +11,7 @@ export async function transcribeVoiceNote(
   audioBuffer: Buffer,
   mimeType: string = "audio/ogg"
 ): Promise<VoiceTranscriptionResult> {
-  const groqApiKey = process.env.GROQ_API_KEY;
+  const groqApiKey = process.env.GROQ_API_KEY?.trim();
   if (!groqApiKey) {
     console.warn("[Voice Transcription] GROQ_API_KEY not found in environment variables");
     return { text: null, error: "missing_groq_api_key" };
