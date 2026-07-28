@@ -5,6 +5,62 @@ import { getAIResponse } from "@/lib/ai";
 import { getVideoGuideForCategory } from "@/lib/video-guides";
 import { transcribeVoiceNote } from "@/lib/transcribe";
 
+type InboundMediaType = "text" | "image" | "audio" | "video" | "location";
+
+interface ActionPayload {
+  action?: "CREATE_TICKET" | "RESOLVE_ISSUE";
+  category?: string;
+  severity?: string;
+  root_cause?: string;
+  confidence_score?: number;
+  suggested_solution?: string;
+  issue_id?: string;
+}
+
+const GENERIC_GREETING_PATTERNS = [
+  /hello!?\s+how can i help you today\??/i,
+  /if you are reporting a vehicle issue/i,
+  /how can i assist you\??/i,
+];
+
+function isGenericGreetingResponse(response: string) {
+  return GENERIC_GREETING_PATTERNS.some((pattern) => pattern.test(response));
+}
+
+function extractFaultCode(content: string) {
+  return content.match(/\bfault\s*code\s*[:#-]?\s*([a-z0-9-]+)\b/i)?.[1] ?? null;
+}
+
+function buildIssueFallbackResponse(content: string, mediaType: InboundMediaType) {
+  const faultCode = extractFaultCode(content);
+
+  if (faultCode) {
+    return `Fault code ${faultCode} received. Please park in a safe location before checking anything.
+
+Fault-code meanings vary by vehicle make, model, and engine system, so please send:
+1. Vehicle plate number
+2. Vehicle make/model
+3. Any dashboard warning text or light color
+4. Current symptoms, such as power loss, overheating, smoke, brake issue, or engine not starting
+
+If the warning is red/flashing, the engine is overheating, smoke is visible, brakes feel unsafe, or power is dropping, stop driving and wait for support.`;
+  }
+
+  if (mediaType === "audio" && content === "[Voice Note Received]") {
+    return "I received your voice note, but I could not transcribe it clearly. Please type the vehicle issue or send another voice note from a quieter place. If you are driving, park safely first.";
+  }
+
+  if (mediaType === "audio" && content.includes("[Voice Note Transcribed]:")) {
+    return `I received and transcribed your voice note. Please confirm these details so I can help correctly:
+
+${content}
+
+If this is urgent, park safely and share your vehicle plate number and current location.`;
+  }
+
+  return null;
+}
+
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const mode = searchParams.get("hub.mode");
@@ -43,7 +99,7 @@ export async function POST(request: NextRequest) {
 
   let textContent = "";
   let mediaUrl: string | null = null;
-  let mediaType: "text" | "image" | "audio" | "video" | "location" = "text";
+  let mediaType: InboundMediaType = "text";
   let locationLat: number | null = null;
   let locationLng: number | null = null;
 
@@ -58,6 +114,11 @@ export async function POST(request: NextRequest) {
   } else if (msgType === "audio" || msgType === "voice") {
     const audioObj = message.audio || message.voice;
     mediaType = "audio";
+    void sendWhatsAppMessage(
+      phone,
+      "I received your voice note and I am analyzing it now. Please stay parked safely if this is a vehicle issue."
+    ).catch((error) => console.warn("Failed to send voice note acknowledgement", error));
+
     const mediaDetails = await downloadAndSaveWhatsAppMediaDetails(audioObj.id, "audio");
     mediaUrl = mediaDetails.publicUrl;
 
@@ -67,6 +128,9 @@ export async function POST(request: NextRequest) {
         textContent = `🎙️ [Voice Note Transcribed]: "${transcript}"`;
       } else {
         textContent = "[Voice Note Received]";
+      }
+      if (textContent.includes("[Voice Note Transcribed]:")) {
+        textContent = textContent.replace(/^.*?(\[Voice Note Transcribed\]:)/, "$1");
       }
     } else {
       textContent = "[Voice Note Received]";
@@ -153,17 +217,40 @@ export async function POST(request: NextRequest) {
       return Response.json({ status: "stored_for_human" });
     }
 
+    const canReplyImmediately =
+      Boolean(extractFaultCode(textContent)) ||
+      (mediaType === "audio" && textContent === "[Voice Note Received]");
+    const immediateIssueResponse = canReplyImmediately
+      ? buildIssueFallbackResponse(textContent, mediaType)
+      : null;
+    if (immediateIssueResponse) {
+      await sendWhatsAppMessage(phone, immediateIssueResponse);
+
+      await supabase.from("messages").insert({
+        conversation_id: conversation.id,
+        role: "assistant",
+        content: immediateIssueResponse,
+      });
+
+      await supabase
+        .from("conversations")
+        .update({ updated_at: new Date().toISOString() })
+        .eq("id", conversation.id);
+
+      return Response.json({ status: "processed_fast" });
+    }
+
     // 4. Fetch recent conversation history (last 15 messages)
     const { data: history } = await supabase
       .from("messages")
       .select("role, content, media_url, media_type")
       .eq("conversation_id", conversation.id)
-      .order("created_at", { ascending: true })
+      .order("created_at", { ascending: false })
       .limit(15);
 
     // 5. Query AI for response & classification
     const aiRawOutput = await getAIResponse(
-      (history || []).map((m) => ({
+      (history || []).reverse().map((m) => ({
         role: m.role as "user" | "assistant",
         content: m.content,
         media_url: m.media_url,
@@ -173,17 +260,23 @@ export async function POST(request: NextRequest) {
 
     // 6. Check for json_action block in AI response
     let finalCleanResponse = aiRawOutput;
-    let actionPayload: any = null;
+    let actionPayload: ActionPayload | null = null;
 
     const actionMatch = aiRawOutput.match(/```json_action([\s\S]*?)```/);
     if (actionMatch) {
       try {
-        actionPayload = JSON.parse(actionMatch[1].trim());
+        actionPayload = JSON.parse(actionMatch[1].trim()) as ActionPayload;
         // Clean out json block from driver's text response
         finalCleanResponse = aiRawOutput.replace(/```json_action[\s\S]*?```/, "").trim();
       } catch (e) {
         console.warn("Failed to parse JSON action block from AI response", e);
       }
+    }
+
+    const issueFallbackResponse = buildIssueFallbackResponse(textContent, mediaType);
+    if (issueFallbackResponse && isGenericGreetingResponse(finalCleanResponse)) {
+      finalCleanResponse = issueFallbackResponse;
+      actionPayload = null;
     }
 
     // 7. Process Actions (Create Ticket or Resolve Issue)
