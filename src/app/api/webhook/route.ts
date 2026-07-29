@@ -23,6 +23,8 @@ const GENERIC_GREETING_PATTERNS = [
   /how can i assist you\??/i,
 ];
 
+const PROCESSED_WAMIDS = new Set<string>();
+
 function isGenericGreetingResponse(response: string) {
   return GENERIC_GREETING_PATTERNS.some((pattern) => pattern.test(response));
 }
@@ -98,6 +100,15 @@ export async function POST(request: NextRequest) {
   const msgType = message.type as "text" | "image" | "audio" | "voice" | "video" | "location";
 
   if (whatsappMsgId) {
+    if (PROCESSED_WAMIDS.has(whatsappMsgId)) {
+      return Response.json({ status: "duplicate" });
+    }
+    PROCESSED_WAMIDS.add(whatsappMsgId);
+    if (PROCESSED_WAMIDS.size > 3000) {
+      const first = PROCESSED_WAMIDS.values().next().value;
+      if (first) PROCESSED_WAMIDS.delete(first);
+    }
+
     const { data: existingMessage } = await supabase
       .from("messages")
       .select("id")
@@ -287,6 +298,12 @@ export async function POST(request: NextRequest) {
     const issueFallbackResponse = buildIssueFallbackResponse(textContent, mediaType);
     if (issueFallbackResponse && isGenericGreetingResponse(finalCleanResponse)) {
       finalCleanResponse = issueFallbackResponse;
+      actionPayload = null;
+    } else if (
+      ( (history?.length || 0) > 2 || conversation.active_issue_id ) &&
+      isGenericGreetingResponse(finalCleanResponse)
+    ) {
+      finalCleanResponse = "I have received your message. Please share any additional details, warning light photos, or your vehicle plate number so I can assist you immediately.";
       actionPayload = null;
     }
 
