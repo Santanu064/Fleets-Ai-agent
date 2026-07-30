@@ -272,14 +272,23 @@ export async function findMatchingFaultCodeAsync(text: string): Promise<FaultCod
   const clean = text.toLowerCase().trim();
   const dataset = await getActiveDataset();
 
-  // 1. Try exact numerical match against fault_code
-  const numMatch = clean.match(/\b(\d{2,5})\b/);
-  if (numMatch) {
-    const code = numMatch[1];
-    const foundByCode = dataset.find(
-      (r) => r.fault_code === code || r.spn === code
-    );
-    if (foundByCode) return foundByCode;
+  // 0. Try SPN + FMI combo match (e.g. "Spn 629fmi 12", "SPN 629 FMI 12", "629 12")
+  const spnFmiMatch = clean.match(/spn\s*[:#-]?\s*(\d+).*?fmi\s*[:#-]?\s*(\d+)/i) ||
+                      clean.match(/(\d{3,5})\s*fmi\s*[:#-]?\s*(\d+)/i);
+  if (spnFmiMatch) {
+    const targetSpn = spnFmiMatch[1];
+    const targetFmi = spnFmiMatch[2];
+    const foundBySpnFmi = dataset.find((r) => r.spn === targetSpn && r.fmi === targetFmi);
+    if (foundBySpnFmi) return foundBySpnFmi;
+  }
+
+  // 1. Try exact numerical match against fault_code or SPN
+  const numMatches = clean.match(/\b(\d{2,5})\b/g);
+  if (numMatches) {
+    for (const num of numMatches) {
+      const foundByCode = dataset.find((r) => r.fault_code === num || r.spn === num);
+      if (foundByCode) return foundByCode;
+    }
   }
 
   // 2. Try matching keywords or categories
@@ -288,15 +297,12 @@ export async function findMatchingFaultCodeAsync(text: string): Promise<FaultCod
 
   for (const row of dataset) {
     let score = 0;
-
     if (clean.includes(row.category.toLowerCase())) score += 5;
-
     for (const kw of row.keywords) {
       if (clean.includes(kw.toLowerCase())) {
         score += 2;
       }
     }
-
     if (score > highestScore) {
       highestScore = score;
       bestMatch = row;
@@ -311,11 +317,21 @@ export function findMatchingFaultCode(text: string): FaultCodeRow | null {
   const clean = text.toLowerCase().trim();
   const dataset = liveCache?.data || MASTER_FAULT_CODES;
 
-  const numMatch = clean.match(/\b(\d{2,5})\b/);
-  if (numMatch) {
-    const code = numMatch[1];
-    const foundByCode = dataset.find((r) => r.fault_code === code || r.spn === code);
-    if (foundByCode) return foundByCode;
+  const spnFmiMatch = clean.match(/spn\s*[:#-]?\s*(\d+).*?fmi\s*[:#-]?\s*(\d+)/i) ||
+                      clean.match(/(\d{3,5})\s*fmi\s*[:#-]?\s*(\d+)/i);
+  if (spnFmiMatch) {
+    const targetSpn = spnFmiMatch[1];
+    const targetFmi = spnFmiMatch[2];
+    const foundBySpnFmi = dataset.find((r) => r.spn === targetSpn && r.fmi === targetFmi);
+    if (foundBySpnFmi) return foundBySpnFmi;
+  }
+
+  const numMatches = clean.match(/\b(\d{2,5})\b/g);
+  if (numMatches) {
+    for (const num of numMatches) {
+      const foundByCode = dataset.find((r) => r.fault_code === num || r.spn === num);
+      if (foundByCode) return foundByCode;
+    }
   }
 
   let bestMatch: FaultCodeRow | null = null;
