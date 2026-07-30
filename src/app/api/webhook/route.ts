@@ -185,14 +185,14 @@ export async function POST(request: NextRequest) {
       .from("drivers")
       .select("*")
       .eq("phone", phone)
-      .single();
+      .maybeSingle();
 
     if (!driver) {
       const { data: newDriver } = await supabase
         .from("drivers")
         .insert({ phone, full_name: name || `Driver (${phone.slice(-4)})` })
         .select()
-        .single();
+        .maybeSingle();
       driver = newDriver;
     }
 
@@ -201,7 +201,7 @@ export async function POST(request: NextRequest) {
       .from("conversations")
       .select("*")
       .eq("phone", phone)
-      .single();
+      .maybeSingle();
 
     if (!conversation) {
       const { data: newConvo } = await supabase
