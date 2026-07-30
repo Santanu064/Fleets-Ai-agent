@@ -4,7 +4,7 @@ import { sendWhatsAppMessage, downloadAndSaveWhatsAppMedia, downloadAndSaveWhats
 import { getAIResponse } from "@/lib/ai";
 import { getVideoGuideForCategory } from "@/lib/video-guides";
 import { transcribeVoiceNote } from "@/lib/transcribe";
-import { findMatchingFaultCode, getDriverInstructionForLanguage } from "@/lib/fault-codes";
+import { findMatchingFaultCode, findMatchingFaultCodeAsync, getDriverInstructionForLanguage } from "@/lib/fault-codes";
 
 type InboundMediaType = "text" | "image" | "audio" | "video" | "location";
 
@@ -34,8 +34,8 @@ function extractFaultCode(content: string) {
   return content.match(/\bfault\s*code\s*[:#-]?\s*([a-z0-9-]+)\b/i)?.[1] ?? null;
 }
 
-function buildIssueFallbackResponse(content: string, mediaType: InboundMediaType) {
-  const match = findMatchingFaultCode(content);
+async function buildIssueFallbackResponse(content: string, mediaType: InboundMediaType) {
+  const match = await findMatchingFaultCodeAsync(content);
 
   if (match) {
     const instruction = getDriverInstructionForLanguage(match, content);
@@ -250,9 +250,10 @@ export async function POST(request: NextRequest) {
 
     const canReplyImmediately =
       Boolean(extractFaultCode(textContent)) ||
+      Boolean(await findMatchingFaultCodeAsync(textContent)) ||
       (mediaType === "audio" && (textContent === "[Voice Note Received]" || textContent.startsWith("[Voice Note Received")));
     const immediateIssueResponse = canReplyImmediately
-      ? buildIssueFallbackResponse(textContent, mediaType)
+      ? await buildIssueFallbackResponse(textContent, mediaType)
       : null;
     if (immediateIssueResponse) {
       await sendWhatsAppMessage(phone, immediateIssueResponse);
@@ -304,7 +305,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const issueFallbackResponse = buildIssueFallbackResponse(textContent, mediaType);
+    const issueFallbackResponse = await buildIssueFallbackResponse(textContent, mediaType);
     if (issueFallbackResponse && isGenericGreetingResponse(finalCleanResponse)) {
       finalCleanResponse = issueFallbackResponse;
       actionPayload = null;
@@ -317,7 +318,7 @@ export async function POST(request: NextRequest) {
     }
 
     // 7. Process Actions (Create Ticket or Resolve Issue)
-    const sheetMatch = findMatchingFaultCode(textContent);
+    const sheetMatch = await findMatchingFaultCodeAsync(textContent);
 
     if (actionPayload?.action === "CREATE_TICKET" || (sheetMatch && (!sheetMatch.can_drive || sheetMatch.severity === "RED_STOP"))) {
       // Generate unique Issue ID: LG-2026-XXXXXX

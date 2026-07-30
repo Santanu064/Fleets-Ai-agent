@@ -117,18 +117,166 @@ export const MASTER_FAULT_CODES: FaultCodeRow[] = [
   },
 ];
 
+// In-memory cache for live Google Sheets dataset
+let liveCache: { timestamp: number; data: FaultCodeRow[] } | null = null;
+const CACHE_TTL_MS = 60 * 1000; // 60 seconds cache
+
 /**
- * Searches the dataset by numerical Fault Code, SPN, FMI, or Keywords.
+ * Simple CSV parser handling quotes
  */
-export function findMatchingFaultCode(text: string): FaultCodeRow | null {
+function parseCSV(csvText: string): string[][] {
+  const lines: string[][] = [];
+  let row: string[] = [];
+  let entry = "";
+  let insideQuote = false;
+
+  for (let i = 0; i < csvText.length; i++) {
+    const char = csvText[i];
+    const nextChar = csvText[i + 1];
+
+    if (char === '"') {
+      if (insideQuote && nextChar === '"') {
+        entry += '"';
+        i++;
+      } else {
+        insideQuote = !insideQuote;
+      }
+    } else if (char === "," && !insideQuote) {
+      row.push(entry.trim());
+      entry = "";
+    } else if ((char === "\n" || char === "\r") && !insideQuote) {
+      if (char === "\r" && nextChar === "\n") i++;
+      row.push(entry.trim());
+      if (row.length > 0 && row.some((field) => field.length > 0)) {
+        lines.push(row);
+      }
+      row = [];
+      entry = "";
+    } else {
+      entry += char;
+    }
+  }
+
+  if (entry.length > 0 || row.length > 0) {
+    row.push(entry.trim());
+    lines.push(row);
+  }
+
+  return lines;
+}
+
+/**
+ * Fetches live rows from Google Sheets published CSV URL if configured
+ */
+export async function getActiveDataset(): Promise<FaultCodeRow[]> {
+  const url = process.env.GOOGLE_SHEETS_CSV_URL;
+  if (!url || !url.trim()) {
+    return MASTER_FAULT_CODES;
+  }
+
+  const now = Date.now();
+  if (liveCache && now - liveCache.timestamp < CACHE_TTL_MS) {
+    return liveCache.data;
+  }
+
+  try {
+    const res = await fetch(url, { next: { revalidate: 60 } });
+    if (!res.ok) {
+      console.warn("[Google Sheets] HTTP Error fetching live dataset:", res.status);
+      return liveCache?.data || MASTER_FAULT_CODES;
+    }
+
+    const csvText = await res.text();
+    const rows = parseCSV(csvText);
+    if (rows.length < 2) {
+      return liveCache?.data || MASTER_FAULT_CODES;
+    }
+
+    // Header row mapping
+    const headers = rows[0].map((h) => h.toLowerCase().trim());
+    const getColIndex = (name: string) => headers.findIndex((h) => h === name || h.includes(name));
+
+    const idxCode = getColIndex("fault_code");
+    const idxSpn = getColIndex("spn");
+    const idxFmi = getColIndex("fmi");
+    const idxLamp = getColIndex("lamp_color");
+    const idxJ1939 = getColIndex("j1939_description");
+    const idxCummins = getColIndex("cummins_description");
+    const idxCategory = getColIndex("category");
+    const idxKeywords = getColIndex("keywords");
+    const idxSeverity = getColIndex("severity");
+    const idxInstEn = getColIndex("driver_instructions_en");
+    const idxInstHi = getColIndex("driver_instructions_hi");
+    const idxInstBn = getColIndex("driver_instructions_bn");
+    const idxTech = getColIndex("technician_notes");
+    const idxVideo = getColIndex("video_link");
+    const idxDept = getColIndex("department");
+    const idxTime = getColIndex("estimated_repair_time");
+    const idxDrive = getColIndex("can_drive");
+
+    const parsedDataset: FaultCodeRow[] = [];
+
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r || r.length === 0) continue;
+
+      const code = idxCode !== -1 ? r[idxCode] || "" : "";
+      if (!code && idxCategory !== -1 && !r[idxCategory]) continue;
+
+      const keywordsRaw = idxKeywords !== -1 ? r[idxKeywords] || "" : "";
+      const keywords = keywordsRaw
+        .split(",")
+        .map((k) => k.trim())
+        .filter(Boolean);
+
+      const canDriveRaw = idxDrive !== -1 ? (r[idxDrive] || "").toUpperCase() : "TRUE";
+      const canDrive = canDriveRaw === "TRUE" || canDriveRaw === "YES" || canDriveRaw === "1";
+
+      parsedDataset.push({
+        fault_code: code || `ROW-${i}`,
+        spn: idxSpn !== -1 ? r[idxSpn] || "" : "",
+        fmi: idxFmi !== -1 ? r[idxFmi] || "" : "",
+        lamp_color: idxLamp !== -1 ? r[idxLamp] || "" : "",
+        j1939_description: idxJ1939 !== -1 ? r[idxJ1939] || "" : "",
+        cummins_description: idxCummins !== -1 ? r[idxCummins] || "" : "",
+        category: idxCategory !== -1 ? r[idxCategory] || "General Issue" : "General Issue",
+        keywords: keywords.length > 0 ? keywords : [code],
+        severity: idxSeverity !== -1 ? r[idxSeverity] || "AMBER_CAUTION" : "AMBER_CAUTION",
+        driver_instructions_en: idxInstEn !== -1 ? r[idxInstEn] || "" : "",
+        driver_instructions_hi: idxInstHi !== -1 ? r[idxInstHi] || "" : "",
+        driver_instructions_bn: idxInstBn !== -1 ? r[idxInstBn] || "" : "",
+        technician_notes: idxTech !== -1 ? r[idxTech] || "" : "",
+        video_link: idxVideo !== -1 ? r[idxVideo] || "" : "",
+        department: idxDept !== -1 ? r[idxDept] || "Dispatch Mechanics" : "Dispatch Mechanics",
+        estimated_repair_time: idxTime !== -1 ? r[idxTime] || "1-2 hours" : "1-2 hours",
+        can_drive: canDrive,
+      });
+    }
+
+    if (parsedDataset.length > 0) {
+      liveCache = { timestamp: now, data: parsedDataset };
+      return parsedDataset;
+    }
+  } catch (err) {
+    console.error("[Google Sheets Sync Exception]:", err);
+  }
+
+  return liveCache?.data || MASTER_FAULT_CODES;
+}
+
+/**
+ * Searches the dataset (live or cached) by numerical Fault Code, SPN, FMI, or Keywords.
+ */
+export async function findMatchingFaultCodeAsync(text: string): Promise<FaultCodeRow | null> {
   if (!text || !text.trim()) return null;
   const clean = text.toLowerCase().trim();
+  const dataset = await getActiveDataset();
 
   // 1. Try exact numerical match against fault_code
   const numMatch = clean.match(/\b(\d{2,5})\b/);
   if (numMatch) {
     const code = numMatch[1];
-    const foundByCode = MASTER_FAULT_CODES.find(
+    const foundByCode = dataset.find(
       (r) => r.fault_code === code || r.spn === code
     );
     if (foundByCode) return foundByCode;
@@ -138,19 +286,47 @@ export function findMatchingFaultCode(text: string): FaultCodeRow | null {
   let bestMatch: FaultCodeRow | null = null;
   let highestScore = 0;
 
-  for (const row of MASTER_FAULT_CODES) {
+  for (const row of dataset) {
     let score = 0;
 
-    // Check category
     if (clean.includes(row.category.toLowerCase())) score += 5;
 
-    // Check keywords
     for (const kw of row.keywords) {
       if (clean.includes(kw.toLowerCase())) {
         score += 2;
       }
     }
 
+    if (score > highestScore) {
+      highestScore = score;
+      bestMatch = row;
+    }
+  }
+
+  return highestScore >= 2 ? bestMatch : null;
+}
+
+export function findMatchingFaultCode(text: string): FaultCodeRow | null {
+  if (!text || !text.trim()) return null;
+  const clean = text.toLowerCase().trim();
+  const dataset = liveCache?.data || MASTER_FAULT_CODES;
+
+  const numMatch = clean.match(/\b(\d{2,5})\b/);
+  if (numMatch) {
+    const code = numMatch[1];
+    const foundByCode = dataset.find((r) => r.fault_code === code || r.spn === code);
+    if (foundByCode) return foundByCode;
+  }
+
+  let bestMatch: FaultCodeRow | null = null;
+  let highestScore = 0;
+
+  for (const row of dataset) {
+    let score = 0;
+    if (clean.includes(row.category.toLowerCase())) score += 5;
+    for (const kw of row.keywords) {
+      if (clean.includes(kw.toLowerCase())) score += 2;
+    }
     if (score > highestScore) {
       highestScore = score;
       bestMatch = row;
@@ -169,7 +345,6 @@ export function getDriverInstructionForLanguage(
 ): string {
   const lower = text.toLowerCase();
   
-  // Detect language or script
   const isHindi = /[\u0900-\u097F]/.test(text) || lower.includes("ruko") || lower.includes("karo") || lower.includes("chalao");
   const isBengali = /[\u0980-\u09FF]/.test(text) || lower.includes("thamao") || lower.includes("bondho") || lower.includes("koro");
 
@@ -179,5 +354,5 @@ export function getDriverInstructionForLanguage(
   if (isBengali && row.driver_instructions_bn) {
     return row.driver_instructions_bn;
   }
-  return row.driver_instructions_en;
+  return row.driver_instructions_en || row.driver_instructions_hi || row.driver_instructions_bn;
 }
