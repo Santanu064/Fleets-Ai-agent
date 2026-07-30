@@ -248,14 +248,18 @@ export default function TechnicianPortal() {
                 </h3>
                 <div className="space-y-3 text-sm">
                   <div>
-                    <span className="text-xs text-white/40 block">Category:</span>
-                    <span className="font-semibold text-white">{issue.category}</span>
+                    <span className="text-xs text-white/40 block">Assigned Department:</span>
+                    <span className="font-semibold text-amber-300">{issue.department || "General Mechanics Team"}</span>
                   </div>
                   <div>
-                    <span className="text-xs text-white/40 block">Root Cause Analysis:</span>
-                    <p className="text-white/80 bg-white/5 p-2.5 rounded-lg text-xs leading-relaxed mt-1">
-                      {issue.ai_diagnosis || issue.root_cause || "Pending detailed inspection"}
+                    <span className="text-xs text-white/40 block">Technician Notes & Manual Action:</span>
+                    <p className="text-white/90 bg-indigo-500/10 border border-indigo-500/20 p-2.5 rounded-lg text-xs leading-relaxed mt-1">
+                      {issue.suggested_solution || issue.ai_diagnosis || "Inspect vehicle wiring and sensor circuits."}
                     </p>
+                  </div>
+                  <div className="flex justify-between py-1 border-b border-white/5">
+                    <span className="text-white/40">Est. Repair Time:</span>
+                    <span className="font-mono text-emerald-400 font-semibold">{issue.estimated_repair_time || "1 - 2 hours"}</span>
                   </div>
                   <div>
                     <span className="text-xs text-white/40 block">AI Confidence Score:</span>

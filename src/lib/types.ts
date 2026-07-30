@@ -61,6 +61,13 @@ export interface Issue {
   suggested_solution: string | null;
   video_guide_url: string | null;
   resolution_notes: string | null;
+  fault_code?: string | null;
+  spn?: string | null;
+  fmi?: string | null;
+  lamp_color?: string | null;
+  department?: string | null;
+  estimated_repair_time?: string | null;
+  can_drive?: boolean | null;
   created_at: string;
   resolved_at: string | null;
   driver?: Driver | null;

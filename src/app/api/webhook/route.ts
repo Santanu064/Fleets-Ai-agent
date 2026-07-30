@@ -4,6 +4,7 @@ import { sendWhatsAppMessage, downloadAndSaveWhatsAppMedia, downloadAndSaveWhats
 import { getAIResponse } from "@/lib/ai";
 import { getVideoGuideForCategory } from "@/lib/video-guides";
 import { transcribeVoiceNote } from "@/lib/transcribe";
+import { findMatchingFaultCode, getDriverInstructionForLanguage } from "@/lib/fault-codes";
 
 type InboundMediaType = "text" | "image" | "audio" | "video" | "location";
 
@@ -34,8 +35,24 @@ function extractFaultCode(content: string) {
 }
 
 function buildIssueFallbackResponse(content: string, mediaType: InboundMediaType) {
-  const faultCode = extractFaultCode(content);
+  const match = findMatchingFaultCode(content);
 
+  if (match) {
+    const instruction = getDriverInstructionForLanguage(match, content);
+    const stopWarning = !match.can_drive || match.severity === "RED_STOP"
+      ? "\n\n⚠️ *CRITICAL SAFETY WARNING:* Red Stop Lamp Active / Cannot Drive. Turn off engine immediately and pull over safely."
+      : "";
+    const video = match.video_link ? `\n\n🎥 *Instructional Video Guide:*\n${match.video_link}` : "";
+
+    return `🚨 *Fault Code Detected: ${match.fault_code}* (${match.category})
+SPN: ${match.spn} | FMI: ${match.fmi} | Lamp: ${match.lamp_color}
+Description: ${match.cummins_description || match.j1939_description}
+
+📋 *Driver Action Steps:*
+${instruction}${stopWarning}${video}`;
+  }
+
+  const faultCode = extractFaultCode(content);
   if (faultCode) {
     return `Fault code ${faultCode} received. Please park in a safe location before checking anything.
 
@@ -50,14 +67,6 @@ If the warning is red/flashing, the engine is overheating, smoke is visible, bra
 
   if (mediaType === "audio" && (content === "[Voice Note Received]" || content.startsWith("[Voice Note Received"))) {
     return "I received your voice note, but I could not process the audio clearly. Please type the vehicle issue or send another short voice note from a quieter place. If you are driving, park safely first.";
-  }
-
-  if (mediaType === "audio" && content.includes("[Voice Note Transcribed]:")) {
-    return `I received and transcribed your voice note. Please confirm these details so I can help correctly:
-
-${content}
-
-If this is urgent, park safely and share your vehicle plate number and current location.`;
   }
 
   return null;
@@ -308,15 +317,23 @@ export async function POST(request: NextRequest) {
     }
 
     // 7. Process Actions (Create Ticket or Resolve Issue)
-    if (actionPayload?.action === "CREATE_TICKET") {
+    const sheetMatch = findMatchingFaultCode(textContent);
+
+    if (actionPayload?.action === "CREATE_TICKET" || (sheetMatch && (!sheetMatch.can_drive || sheetMatch.severity === "RED_STOP"))) {
       // Generate unique Issue ID: LG-2026-XXXXXX
       const prefix = process.env.ISSUE_ID_PREFIX || "LG";
       const year = new Date().getFullYear();
       const randomSeq = Math.floor(100000 + Math.random() * 900000);
       const issueId = `${prefix}-${year}-${randomSeq}`;
 
-      const category = actionPayload.category || "Vehicle Mechanical Issue";
-      const severity = actionPayload.severity || "major";
+      const category = sheetMatch?.category || actionPayload?.category || "Vehicle Mechanical Issue";
+      const severity = (sheetMatch && (!sheetMatch.can_drive || sheetMatch.severity === "RED_STOP"))
+        ? "critical"
+        : (actionPayload?.severity || "major");
+
+      const diagnosis = sheetMatch?.cummins_description || actionPayload?.root_cause || "Vehicle fault code / issue detected";
+      const solution = sheetMatch?.technician_notes || actionPayload?.suggested_solution || "Technician review requested";
+      const videoUrl = sheetMatch?.video_link || null;
 
       // Insert into issues table
       const { data: newIssue } = await supabase
@@ -329,10 +346,11 @@ export async function POST(request: NextRequest) {
           category,
           severity,
           status: "open",
-          ai_diagnosis: actionPayload.root_cause || "Vehicle issue detected by AI",
-          ai_confidence_score: actionPayload.confidence_score || 0.88,
-          root_cause: actionPayload.root_cause || category,
-          suggested_solution: actionPayload.suggested_solution || "Technician review requested",
+          ai_diagnosis: diagnosis,
+          ai_confidence_score: actionPayload?.confidence_score || 0.95,
+          root_cause: diagnosis,
+          suggested_solution: solution,
+          video_guide_url: videoUrl,
         })
         .select()
         .single();
@@ -345,7 +363,9 @@ export async function POST(request: NextRequest) {
           .eq("id", conversation.id);
 
         // Append ticket ID confirmation to driver message
-        finalCleanResponse += `\n\n📋 **Support Ticket Created**\nIssue ID: *${issueId}*\nSeverity: ${severity.toUpperCase()}\nStatus: Required Technician Assistance\n\nPlease share this Issue ID with your technician when they arrive.`;
+        if (!finalCleanResponse.includes("Issue ID:")) {
+          finalCleanResponse += `\n\n📋 **Support Ticket Created**\nIssue ID: *${issueId}*\nSeverity: ${severity.toUpperCase()}\nAssigned Team: ${sheetMatch?.department || "Dispatch Mechanics"}\n\nPlease share this Issue ID with your technician when they arrive.`;
+        }
       }
     } else if (actionPayload?.action === "RESOLVE_ISSUE" && conversation.active_issue_id) {
       await supabase
