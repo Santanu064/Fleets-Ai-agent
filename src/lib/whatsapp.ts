@@ -1,53 +1,91 @@
 import { supabase } from "./supabase";
+import { withTimeout, retry } from "./request-context";
+
+const META_API_TIMEOUT_MS = 8000;
+const MEDIA_DOWNLOAD_TIMEOUT_MS = 10000;
+
+// ─── Send WhatsApp Text Message ─────────────────────────────────────────────────
 
 export async function sendWhatsAppMessage(to: string, body: string) {
-  const res = await fetch(
-    `https://graph.facebook.com/v22.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to,
-        type: "text",
-        text: { body },
-      }),
-    }
+  return retry(
+    async () => {
+      const res = await withTimeout(
+        fetch(
+          `https://graph.facebook.com/v22.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              messaging_product: "whatsapp",
+              to,
+              type: "text",
+              text: { body },
+            }),
+          }
+        ),
+        META_API_TIMEOUT_MS,
+        "WhatsApp Send"
+      );
+
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => "unknown");
+        console.error("[WhatsApp Send Error]:", { status: res.status, body: errBody });
+        throw new Error(`WhatsApp API error: ${res.status}`);
+      }
+
+      return res.json();
+    },
+    { maxRetries: 1, baseDelayMs: 1000, operationName: "WhatsApp Send" }
   );
+}
+
+// ─── Send WhatsApp Image Message ────────────────────────────────────────────────
+
+export async function sendWhatsAppImage(to: string, imageUrl: string, caption?: string) {
+  const res = await withTimeout(
+    fetch(
+      `https://graph.facebook.com/v22.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to,
+          type: "image",
+          image: {
+            link: imageUrl,
+            caption: caption || "",
+          },
+        }),
+      }
+    ),
+    META_API_TIMEOUT_MS,
+    "WhatsApp Image Send"
+  );
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => "unknown");
+    console.error("[WhatsApp Image Send Error]:", { status: res.status, body: errBody });
+  }
+
   return res.json();
 }
 
-export async function sendWhatsAppImage(to: string, imageUrl: string, caption?: string) {
-  const res = await fetch(
-    `https://graph.facebook.com/v22.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to,
-        type: "image",
-        image: {
-          link: imageUrl,
-          caption: caption || "",
-        },
-      }),
-    }
-  );
-  return res.json();
-}
+// ─── Media Download Types ───────────────────────────────────────────────────────
 
 export interface MediaDownloadResult {
   publicUrl: string | null;
   buffer: Buffer | null;
   mimeType: string;
 }
+
+// ─── Download & Save WhatsApp Media ─────────────────────────────────────────────
 
 /**
  * Downloads media from Meta WhatsApp Graph API using media_id and uploads it to Supabase storage.
@@ -61,10 +99,15 @@ export async function downloadAndSaveWhatsAppMediaDetails(
     const token = process.env.WHATSAPP_ACCESS_TOKEN;
     if (!token) return { publicUrl: null, buffer: null, mimeType: "" };
 
-    // 1. Get media URL from Meta Graph API
-    const metaRes = await fetch(`https://graph.facebook.com/v22.0/${mediaId}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    // 1. Get media URL from Meta Graph API (with timeout)
+    const metaRes = await withTimeout(
+      fetch(`https://graph.facebook.com/v22.0/${mediaId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+      MEDIA_DOWNLOAD_TIMEOUT_MS,
+      "Meta Media URL"
+    );
+
     const metaData = await metaRes.json();
     if (!metaRes.ok || !metaData.url) {
       console.error("[WhatsApp Media] Failed to get media URL:", {
@@ -76,10 +119,15 @@ export async function downloadAndSaveWhatsAppMediaDetails(
 
     const mime = metaData.mime_type || "";
 
-    // 2. Download media binary buffer
-    const mediaRes = await fetch(metaData.url, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    // 2. Download media binary buffer (with timeout)
+    const mediaRes = await withTimeout(
+      fetch(metaData.url, {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+      MEDIA_DOWNLOAD_TIMEOUT_MS,
+      "Meta Media Download"
+    );
+
     if (!mediaRes.ok) {
       console.error("[WhatsApp Media] Failed to download media bytes:", {
         status: mediaRes.status,
@@ -105,13 +153,17 @@ export async function downloadAndSaveWhatsAppMediaDetails(
 
     const fileName = `whatsapp_${mediaType}_${Date.now()}_${mediaId.slice(-6)}.${ext}`;
 
-    // 3. Upload to Supabase Storage bucket 'fleet-media'
-    const { data: uploadData, error: uploadError } = await supabase.storage
-      .from("fleet-media")
-      .upload(fileName, buffer, {
-        contentType: mime || "application/octet-stream",
-        upsert: true,
-      });
+    // 3. Upload to Supabase Storage bucket 'fleet-media' (with timeout)
+    const { data: uploadData, error: uploadError } = await withTimeout(
+      supabase.storage
+        .from("fleet-media")
+        .upload(fileName, buffer, {
+          contentType: mime || "application/octet-stream",
+          upsert: true,
+        }),
+      MEDIA_DOWNLOAD_TIMEOUT_MS,
+      "Supabase Storage Upload"
+    );
 
     let publicUrl: string | null = null;
 

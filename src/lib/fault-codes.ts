@@ -1,3 +1,5 @@
+import { withTimeout } from "./request-context";
+
 export interface FaultCodeRow {
   fault_code: string;
   spn: string;
@@ -119,7 +121,32 @@ export const MASTER_FAULT_CODES: FaultCodeRow[] = [
 
 // In-memory cache for live Google Sheets dataset
 let liveCache: { timestamp: number; data: FaultCodeRow[] } | null = null;
-const CACHE_TTL_MS = 60 * 1000; // 60 seconds cache
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes cache (was 60s — reduces redundant Google Sheets fetches)
+
+// ─── Pre-built Index Maps for O(1) Lookups ──────────────────────────────────────
+let indexByCode: Map<string, FaultCodeRow> | null = null;
+let indexBySpn: Map<string, FaultCodeRow> | null = null;
+let indexCacheTimestamp = 0;
+
+function buildIndexMaps(dataset: FaultCodeRow[]): void {
+  indexByCode = new Map();
+  indexBySpn = new Map();
+  for (const row of dataset) {
+    if (row.fault_code) indexByCode.set(row.fault_code, row);
+    if (row.spn) indexBySpn.set(row.spn, row);
+  }
+  indexCacheTimestamp = Date.now();
+}
+
+function getIndexedDataset(dataset: FaultCodeRow[]): { byCode: Map<string, FaultCodeRow>; bySpn: Map<string, FaultCodeRow> } {
+  // Rebuild indexes if cache was refreshed
+  if (!indexByCode || !indexBySpn || indexCacheTimestamp < (liveCache?.timestamp ?? 0)) {
+    buildIndexMaps(dataset);
+  }
+  return { byCode: indexByCode!, bySpn: indexBySpn! };
+}
+
+const SHEETS_FETCH_TIMEOUT_MS = 5000;
 
 /**
  * Simple CSV parser handling quotes
@@ -180,7 +207,11 @@ export async function getActiveDataset(): Promise<FaultCodeRow[]> {
   }
 
   try {
-    const res = await fetch(url, { next: { revalidate: 60 } });
+    const res = await withTimeout(
+      fetch(url, { next: { revalidate: 300 } }),
+      SHEETS_FETCH_TIMEOUT_MS,
+      "Google Sheets CSV"
+    );
     if (!res.ok) {
       console.warn("[Google Sheets] HTTP Error fetching live dataset:", res.status);
       return liveCache?.data || MASTER_FAULT_CODES;
@@ -271,6 +302,7 @@ export async function findMatchingFaultCodeAsync(text: string): Promise<FaultCod
   if (!text || !text.trim()) return null;
   const clean = text.toLowerCase().trim();
   const dataset = await getActiveDataset();
+  const { byCode, bySpn } = getIndexedDataset(dataset);
 
   // 0. Try SPN + FMI combo match (e.g. "Spn 629fmi 12", "SPN 629 FMI 12", "629 12")
   const spnFmiMatch = clean.match(/spn\s*[:#-]?\s*(\d+).*?fmi\s*[:#-]?\s*(\d+)/i) ||
@@ -282,11 +314,11 @@ export async function findMatchingFaultCodeAsync(text: string): Promise<FaultCod
     if (foundBySpnFmi) return foundBySpnFmi;
   }
 
-  // 1. Try exact numerical match against fault_code or SPN
+  // 1. Try exact numerical match against fault_code or SPN using index maps (O(1))
   const numMatches = clean.match(/\b(\d{2,5})\b/g);
   if (numMatches) {
     for (const num of numMatches) {
-      const foundByCode = dataset.find((r) => r.fault_code === num || r.spn === num);
+      const foundByCode = byCode.get(num) || bySpn.get(num);
       if (foundByCode) return foundByCode;
     }
   }
@@ -316,6 +348,7 @@ export function findMatchingFaultCode(text: string): FaultCodeRow | null {
   if (!text || !text.trim()) return null;
   const clean = text.toLowerCase().trim();
   const dataset = liveCache?.data || MASTER_FAULT_CODES;
+  const { byCode, bySpn } = getIndexedDataset(dataset);
 
   const spnFmiMatch = clean.match(/spn\s*[:#-]?\s*(\d+).*?fmi\s*[:#-]?\s*(\d+)/i) ||
                       clean.match(/(\d{3,5})\s*fmi\s*[:#-]?\s*(\d+)/i);
@@ -326,10 +359,11 @@ export function findMatchingFaultCode(text: string): FaultCodeRow | null {
     if (foundBySpnFmi) return foundBySpnFmi;
   }
 
+  // Use index maps for O(1) fault_code/SPN lookups
   const numMatches = clean.match(/\b(\d{2,5})\b/g);
   if (numMatches) {
     for (const num of numMatches) {
-      const foundByCode = dataset.find((r) => r.fault_code === num || r.spn === num);
+      const foundByCode = byCode.get(num) || bySpn.get(num);
       if (foundByCode) return foundByCode;
     }
   }
